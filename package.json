@@ -1,0 +1,30 @@
+{
+  "name": "redsea-agent-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "排障 Agent 服务端，基于 LangChain/LangGraph + MCP，可部署到 BFF 或独立 Node 运行",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsc && node dist/server.js"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.1.15",
+    "@langchain/langgraph": "^1.0.15",
+    "@langchain/openai": "^1.2.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
