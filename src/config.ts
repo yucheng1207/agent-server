@@ -50,3 +50,8 @@ export const RPC_BFF_URL =
 export const FRONTEND_LOG_API =
   process.env.FRONTEND_LOG_API || "https://ws.fulllink.pay.ctripcorp.com/fullLink/PayFullLinkTrackController/queryFrontLog";
 export const FRONTEND_LOG_COOKIE = process.env.FRONTEND_LOG_COOKIE || "";
+
+/** 支付提交流程节点查询（FullLink queryTraceNodeInfo） */
+export const TRACE_NODE_API =
+  process.env.TRACE_NODE_API ||
+  "https://ws.fulllink.pay.ctripcorp.com/fullLink/PayFullLinkTrackController/queryTraceNodeInfo";
