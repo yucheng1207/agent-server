@@ -6,7 +6,17 @@ import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import { queryBat, type BatLogEntry } from "./bat-query.js";
 
-export const INTERFACE_QUERY_CONFIGS: Record<string, Array<{ appId: number; message?: string; command?: string; tagKey: string; description: string }>> = {
+export interface InterfaceQueryConfigItem {
+  appId: number;
+  message?: string;
+  command?: string;
+  tagKey: string;
+  description: string;
+  /** 仅当 tagValue 以此后缀结尾时使用该配置（如 PayToken 以 F 结尾用 100054388） */
+  tagValueEndsWith?: string;
+}
+
+export const INTERFACE_QUERY_CONFIGS: Record<string, InterfaceQueryConfigItem[]> = {
   creation: [
     { appId: 100020575, message: "createPayOrder", command: "", tagKey: "outTradeNo", description: "兼容层创单" },
     { appId: 100049968, message: "createTradeOrder", command: "", tagKey: "outTradeNo", description: "中台创单" },
@@ -16,7 +26,8 @@ export const INTERFACE_QUERY_CONFIGS: Record<string, Array<{ appId: number; mess
     { appId: 100033482, command: "paymentListSearch", tagKey: "paytraceid", description: "支付列表搜索" },
   ],
   payment: [
-    { appId: 100033783, command: "submitPayment", tagKey: "outTradeNo", description: "支付提交" },
+    { appId: 100033783, command: "submitPayment", tagKey: "tradeNo", description: "支付提交" },
+    { appId: 100054388, command: "submitPayment", tagKey: "tradeNo", description: "支付提交(PayToken以F结尾)", tagValueEndsWith: "F" },
   ],
 };
 
@@ -93,17 +104,59 @@ function extractLogInfo(log: BatLogEntry, extractors?: Record<string, (l: BatLog
   return info;
 }
 
+/** 判断是否像订单号（纯数字），payment 必须用 PayToken(tradeNo) 不能传订单号 */
+function looksLikeOrderId(value: string): boolean {
+  return /^\d+$/.test(value.trim());
+}
+
+/** PayToken(tagValue) 以 F 结尾时使用此 appId */
+const PAYMENT_APPID_PAYTOKEN_F = 100054388;
+const PAYMENT_APPID_DEFAULT = 100033783;
+
+/** 判断 PayToken 是否以 F 结尾（兼容尾部空白、零宽字符、全角 F） */
+function payTokenEndsWithF(tagValue: string): boolean {
+  const s = String(tagValue ?? "")
+    .trim()
+    .replace(/[\s\u200B-\u200D\uFEFF]+$/g, "");
+  if (s.length === 0) return false;
+  const code = s.charCodeAt(s.length - 1);
+  return code === 70 || code === 102 || code === 0xff26 || code === 0xff46; // F, f, Ｆ, ｆ
+}
+
 export async function queryInterfaceLogs(
   queryType: string,
   tagValue: string,
   fromDate: number | string,
   toDate: number | string,
   env: "PROD" | "FAT" = "PROD",
-  customQueries?: Array<{ appId: number; message?: string; command?: string; tagKey: string; description: string }>
+  customQueries?: InterfaceQueryConfigItem[]
 ): Promise<InterfaceLogQueryResult> {
-  const queries = customQueries ?? INTERFACE_QUERY_CONFIGS[queryType];
+  let queries = customQueries ?? INTERFACE_QUERY_CONFIGS[queryType];
   if (!queries) {
     return { success: false, queryType, totalLogs: 0, results: [], error: `未知的查询类型: ${queryType}` };
+  }
+  if (queryType === "payment" && looksLikeOrderId(tagValue)) {
+    return {
+      success: false,
+      queryType,
+      totalLogs: 0,
+      results: [],
+      error:
+        "支付提交(payment) 必须使用 PayToken(tradeNo) 作为 tagValue，不能传订单号。请先调用 payment_trace 获取该订单的 payToken 再查询。PayToken 以 F 结尾时使用 appId 100054388。",
+    };
+  }
+  // payment 只查一次：根据 tagValue 是否以 F 结尾选择 appId（明确使用 100054388 / 100033783）
+  if (queryType === "payment") {
+    const base = queries[0];
+    const endsWithF = payTokenEndsWithF(tagValue);
+    const appId = endsWithF ? PAYMENT_APPID_PAYTOKEN_F : PAYMENT_APPID_DEFAULT;
+    queries = [
+      {
+        ...base,
+        appId,
+        description: endsWithF ? "支付提交(PayToken以F结尾)" : base.description,
+      },
+    ];
   }
   const extractors: Record<string, (l: BatLogEntry) => unknown> = queryType === "creation" ? { payToken: extractPayToken } : {};
   const allLogs: InterfaceLogInfo[] = [];
@@ -168,7 +221,14 @@ export async function queryInterfaceLogs(
 export const interfaceLogQueryTool = tool(
   async ({ queryType, tagValue, fromDate, toDate, env }) => {
     if (!queryType) return JSON.stringify({ success: false, error: "请提供查询类型。支持: creation、routing、payment" }, null, 2);
-    if (!tagValue) return JSON.stringify({ success: false, error: "请提供标签值（tagValue），如订单号、PayToken、PageTraceId" }, null, 2);
+    if (!tagValue) return JSON.stringify({ success: false, error: "请提供标签值：创单用订单号(outTradeNo)、路由用 PageTraceId(paytraceid)、支付用 PayToken(tradeNo)" }, null, 2);
+    if (queryType === "payment" && /^\d+$/.test(tagValue.trim())) {
+      return JSON.stringify({
+        success: false,
+        error:
+          "支付提交(payment) 必须使用 PayToken(tradeNo) 作为 tagValue，不能传订单号。请先调用 payment_trace 获取该订单的 payToken 再查询。PayToken 以 F 结尾时会自动使用 appId 100054388。",
+      }, null, 2);
+    }
     if (!fromDate || !toDate) return JSON.stringify({ success: false, error: "请提供时间范围（fromDate 和 toDate）。建议先调用 payment_trace 获取时间信息。" }, null, 2);
     try {
       const result = await queryInterfaceLogs(queryType, tagValue, fromDate, toDate, (env as "PROD" | "FAT") ?? "PROD");
@@ -180,10 +240,10 @@ export const interfaceLogQueryTool = tool(
   {
     name: "interface_log_query",
     description:
-      "通用接口日志查询。支持：创单日志(creation)用订单号查、路由日志(routing)用 PageTraceId 查、支付日志(payment)用 PayToken 查。基于 BAT 查询，需先有 payment_trace 获取时间与 pageTraceId。",
+      "通用接口日志查询。创单(creation)用订单号、路由(routing)用 PageTraceId。查支付提交(payment)时必须先调用 payment_trace 获取时间与 payToken，再用 payToken 作为 tagValue、时间范围作为 fromDate/toDate 调用本工具，禁止未先调 payment_trace 就查 payment。",
     schema: z.object({
       queryType: z.string().describe("查询类型：creation、routing、payment 或 custom"),
-      tagValue: z.string().describe("标签值：创单用订单号；路由用 PageTraceId 可逗号分隔；支付用 PayToken"),
+      tagValue: z.string().describe("标签值：创单用订单号(outTradeNo)；路由用 PageTraceId(paytraceid)可逗号分隔；支付用 PayToken(tradeNo)"),
       fromDate: z.string().describe("起始时间，时间戳或 ISO 字符串"),
       toDate: z.string().describe("结束时间，时间戳或 ISO 字符串"),
       env: z.string().optional().describe("环境：PROD 或 FAT，默认 PROD"),
