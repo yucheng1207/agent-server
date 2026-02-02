@@ -136,10 +136,22 @@ function parseRpcBffResponse(responseText: string): BatSearchResult {
   return result;
 }
 
+/** 将 fromDate/toDate（数字或字符串）转为毫秒时间戳，与 BFF 一致；纯数字字符串视为时间戳；NaN 时返回 fallback */
+function toMs(value: number | string | undefined, fallback: number): number {
+  if (value == null || value === "") return fallback;
+  if (typeof value === "number" && !Number.isNaN(value)) return value;
+  const s = String(value).trim();
+  if (/^\d+$/.test(s)) return Number(s);
+  const t = new Date(value).getTime();
+  return Number.isNaN(t) ? fallback : t;
+}
+
 export async function queryBat(params: BatQueryParams): Promise<BatQueryResponse> {
   const { appId, fromDate, toDate, message = "", command = "", tagKey = "", tagValue = "", isPrd = true, tags } = params;
-  const fromTimestamp = typeof fromDate === "number" ? fromDate : new Date(fromDate).getTime();
-  const toTimestamp = typeof toDate === "number" ? toDate : new Date(toDate).getTime();
+  const now = Date.now();
+  const defaultWindow = { from: now - 60 * 60 * 1000, to: now };
+  const fromTimestamp = toMs(fromDate, defaultWindow.from);
+  const toTimestamp = toMs(toDate, defaultWindow.to);
   let tagsArray: Array<{ key: string; value: string }> = [];
   if (tagKey && tagValue) tagsArray.push({ key: tagKey, value: tagValue });
   if (tags) {
@@ -148,6 +160,8 @@ export async function queryBat(params: BatQueryParams): Promise<BatQueryResponse
       tagsArray = [...tagsArray, ...additional];
     } catch {}
   }
+  // 仅 routing(paytraceid) 时 BFF 要求只传 tags、不传 tagKey/tagValue；创单(outTradeNo)、支付(tradeNo) 需保留 tagKey/tagValue
+  const useTagsOnly = tagsArray.length > 0 && tagKey === "paytraceid";
   const requestBody = {
     type: "Single",
     path: ["queryOsg"],
@@ -158,8 +172,8 @@ export async function queryBat(params: BatQueryParams): Promise<BatQueryResponse
       isPrd,
       message,
       command,
-      tagKey,
-      tagValue,
+      tagKey: useTagsOnly ? "" : tagKey,
+      tagValue: useTagsOnly ? "" : tagValue,
       tags: JSON.stringify(tagsArray),
     },
   };
@@ -179,6 +193,11 @@ export async function queryBat(params: BatQueryParams): Promise<BatQueryResponse
   }
   const responseTime = Date.now() - startTime;
   const text = await response.text();
+  // 创单请求调试：对比与可用的 curl 请求体、响应是否一致
+  if (message === "createPayOrder" || message === "createTradeOrder") {
+    console.log("[BAT 创单] request:", JSON.stringify(requestBody));
+    console.log("[BAT 创单] response status:", response.status, "bodyLength:", text?.length ?? 0);
+  }
   const result: BatQueryResponse = { status: response.status, url: RPC_BFF_URL, params, raw: text, responseTime };
   if (response.ok && text) result.parsed = parseRpcBffResponse(text);
   return result;

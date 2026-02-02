@@ -23,7 +23,7 @@ export const INTERFACE_QUERY_CONFIGS: Record<string, InterfaceQueryConfigItem[]>
   ],
   routing: [
     { appId: 100033482, command: "TradeCoreFacade.internalQueryTradeOrder", tagKey: "paytraceid", description: "交易核心查询" },
-    { appId: 100033482, command: "paymentListSearch", tagKey: "paytraceid", description: "支付列表搜索" },
+    { appId: 100033482, message: "paymentListSearch", command: "", tagKey: "paytraceid", description: "支付列表搜索" },
   ],
   payment: [
     { appId: 100033783, command: "submitPayment", tagKey: "tradeNo", description: "支付提交" },
@@ -116,11 +116,12 @@ function extractPaymentMethodsFromPaymentListSearchLog(rawMessage: Record<string
   }
 }
 
-/** 从 routing 结果中按 payToken 汇总 paymentListSearch 下发的支付方式 */
+/** 从 routing 结果中按 payToken 汇总 paymentListSearch 下发的支付方式（结果项以 message 或 command 标识 paymentListSearch） */
 function aggregatePaymentMethodsByPayToken(results: InterfaceLogQueryResult["results"]): Record<string, PaymentMethodsForPayToken> {
   const byPayToken: Record<string, PaymentMethodsForPayToken> = {};
   for (const r of results) {
-    if (r.command !== "paymentListSearch" || !r.logs) continue;
+    const isPaymentListSearch = r.message === "paymentListSearch" || r.command === "paymentListSearch";
+    if (!isPaymentListSearch || !r.logs) continue;
     for (const log of r.logs) {
       const raw = log.rawMessage as Record<string, unknown> | undefined;
       const extracted = extractPaymentMethodsFromPaymentListSearchLog(raw);
@@ -225,6 +226,22 @@ export async function queryInterfaceLogs(
   const results: InterfaceLogQueryResult["results"] = [];
   const extractedDataAgg: Record<string, unknown[]> = {};
   const tagValues = queryType === "routing" && tagValue.includes(",") ? tagValue.split(",").map((v) => v.trim()).filter(Boolean) : [tagValue];
+  const toMsSafe = (v: number | string | undefined): number => {
+    if (v == null || v === "") return NaN;
+    if (typeof v === "number" && !Number.isNaN(v)) return v;
+    const s = String(v).trim();
+    if (/^\d+$/.test(s)) return Number(s);
+    const t = new Date(v).getTime();
+    return Number.isNaN(t) ? NaN : t;
+  };
+  let fromMs = toMsSafe(fromDate);
+  let toMsVal = toMsSafe(toDate);
+  if (Number.isNaN(fromMs) || Number.isNaN(toMsVal)) {
+    const now = Date.now();
+    const fallback = { from: now - 60 * 60 * 1000, to: now };
+    if (Number.isNaN(fromMs)) fromMs = fallback.from;
+    if (Number.isNaN(toMsVal)) toMsVal = fallback.to;
+  }
   let taskIndex = 0;
   for (const query of queries) {
     for (const currentTagValue of tagValues) {
@@ -234,8 +251,8 @@ export async function queryInterfaceLogs(
       try {
         const batResult = await queryBat({
           appId: query.appId,
-          fromDate: typeof fromDate === "number" ? fromDate : new Date(fromDate).getTime(),
-          toDate: typeof toDate === "number" ? toDate : new Date(toDate).getTime(),
+          fromDate: fromMs,
+          toDate: toMsVal,
           message: query.message,
           command: query.command ?? "",
           tagKey: query.tagKey,

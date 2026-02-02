@@ -1,0 +1,65 @@
+[
+  {
+    "id": "query_issued_payment_methods",
+    "name": "查询订单下发的支付方式",
+    "keywords": [
+      "下发了哪些支付方式",
+      "收银台有哪些支付方式",
+      "有哪些支付方式可选",
+      "支付方式列表",
+      "有哪些支付方式"
+    ],
+    "toolSequence": [
+      {
+        "tool": "payment_trace",
+        "params": { "orderId": "{{orderId}}" }
+      },
+      {
+        "tool": "interface_log_query",
+        "params": {
+          "queryType": "routing",
+          "tagValue": "{{pageTraceId}}",
+          "fromDate": "{{fromDate}}",
+          "toDate": "{{toDate}}",
+          "env": "PROD"
+        }
+      }
+    ],
+    "paramFromContext": ["orderId"],
+    "stepResultParsers": {
+      "payment_trace": "payment_trace_summary"
+    },
+    "answerInstruction": "用 interface_log_query 返回的 extractedData.paymentMethodsByPayToken 按 payToken 列出该订单下发的支付方式：自有支付方式(ownPayways)与三方支付方式(thirdParty)，并说明默认选中(selected)、是否折叠(isHide)。若未查到 paymentMethodsByPayToken 则说明需进一步排查。"
+  },
+  {
+    "id": "query_creation_logs",
+    "name": "查询订单创单日志",
+    "keywords": [
+      "创单日志",
+      "创单记录",
+      "创单接口",
+      "创单"
+    ],
+    "toolSequence": [
+      {
+        "tool": "payment_trace",
+        "params": { "orderId": "{{orderId}}" }
+      },
+      {
+        "tool": "interface_log_query",
+        "params": {
+          "queryType": "creation",
+          "tagValue": "{{orderId}}",
+          "fromDate": "{{fromDate}}",
+          "toDate": "{{toDate}}",
+          "env": "PROD"
+        }
+      }
+    ],
+    "paramFromContext": ["orderId"],
+    "stepResultParsers": {
+      "payment_trace": "payment_trace_summary"
+    },
+    "answerInstruction": "根据 interface_log_query 返回的创单相关日志（兼容层创单 createPayOrder、中台创单 createTradeOrder），总结该订单的创单记录、接口调用情况与结果；若无日志则说明可能时间窗口外或需进一步排查。"
+  }
+]

@@ -1,31 +1,47 @@
 /**
- * Agent 核心（与 agent-demo 对齐：LangGraph ReAct Agent + 流式）
+ * Agent 核心：LangGraph 意图路由 + 通用 ReAct 兜底，流式输出
  */
 
-import { ChatOpenAI } from "@langchain/openai";
+import { HumanMessage, SystemMessage, type BaseMessage } from "@langchain/core/messages";
 import { createReactAgent } from "@langchain/langgraph/prebuilt";
-import { HumanMessage, AIMessage, SystemMessage, type BaseMessage } from "@langchain/core/messages";
 import { getConfig } from "./config.js";
 import { createLLM } from "./llm/index.js";
 import { tools, toolNameMap } from "./tools/index.js";
 import { getSystemPromptWithContext } from "./prompts.js";
 import {
-  getSessionMessages,
   addMessageToSession,
   createSession,
   convertToLangChainMessages,
   getRecentMessages,
 } from "./memory.js";
+import { createIntentGraph, initialGraphState, type NodeConfig } from "./graph/index.js";
 import type { ChatMessage, SessionContext, ToolCallResult } from "./types.js";
 
-let agentInstance: ReturnType<typeof createReactAgent> | null = null;
+/** 包装 LLM 使 invoke 返回 { content: string }，满足 NodeConfig 类型 */
+function wrapLLMForGraph(llm: { invoke: (messages: BaseMessage[]) => Promise<{ content?: unknown }> }): NodeConfig["llm"] {
+  return {
+    invoke: async (messages: BaseMessage[]) => {
+      const res = await llm.invoke(messages);
+      const raw = res?.content;
+      const content = typeof raw === "string" ? raw : Array.isArray(raw) ? "" : String(raw ?? "");
+      return { content };
+    },
+  };
+}
 
-function getAgent(llm?: ChatOpenAI) {
-  if (!agentInstance || llm) {
-    const model = llm || createLLM(getConfig().llm);
-    agentInstance = createReactAgent({ llm: model, tools });
+let compiledGraph: ReturnType<typeof createIntentGraph> | null = null;
+let reactAgentInstance: ReturnType<typeof createReactAgent> | null = null;
+
+function getCompiledGraph() {
+  if (!compiledGraph) compiledGraph = createIntentGraph();
+  return compiledGraph;
+}
+
+function getReactAgent() {
+  if (!reactAgentInstance) {
+    reactAgentInstance = createReactAgent({ llm: createLLM(getConfig().llm), tools });
   }
-  return agentInstance;
+  return reactAgentInstance;
 }
 
 function generateId(): string {
@@ -39,7 +55,7 @@ export type AgentStreamChunk = {
 };
 
 /**
- * 流式运行 Agent（与 agent-demo streamAgent 对齐）
+ * 流式运行：先走 LangGraph 意图图；若命中意图则执行意图链并总结，否则走通用 ReAct，再按序产出 chunk
  */
 export async function* streamAgent(
   input: string,
@@ -52,7 +68,6 @@ export async function* streamAgent(
   const systemPrompt = getSystemPromptWithContext(context as Record<string, string>);
   const historyMessages = getRecentMessages(sid, 10);
   const langchainHistory = convertToLangChainMessages(historyMessages);
-  const initialMessageCount = 1 + langchainHistory.length + 1;
 
   const userMessage: ChatMessage = {
     id: generateId(),
@@ -68,75 +83,125 @@ export async function* streamAgent(
     new HumanMessage(input),
   ];
 
-  const agent = getAgent();
-  const stream = await agent.stream({ messages }, { streamMode: "values" });
+  const initialState = initialGraphState(messages, sid, context ?? {});
+  const configurable: NodeConfig = {
+    tools,
+    llm: wrapLLMForGraph(createLLM(getConfig().llm)),
+    systemPrompt,
+    reactAgent: getReactAgent(),
+  };
 
+  const graph = getCompiledGraph();
+  const stream = await graph.stream(initialState, {
+    configurable,
+    streamMode: "updates",
+  });
+
+  // 流式消费：每步完成后立即产出 chunk，并累积状态用于最终落库
+  let intentMatch: { intent: { name: string } } | null = null;
+  let toolResults: Array<{ tool: string; input: Record<string, unknown>; result: string }> = [];
   let finalReply = "";
-  const toolCalls: ToolCallResult[] = [];
   const reasoning: string[] = [];
-  const processedMessageIds = new Set<string>();
-  let stepCount = 0;
 
   for await (const chunk of stream) {
-    const newMessages = (chunk as { messages: BaseMessage[] }).messages.slice(initialMessageCount);
-
-    for (const msg of newMessages) {
-      const msgId = (msg as unknown as { id?: string }).id || `msg-${newMessages.indexOf(msg)}`;
-      if (processedMessageIds.has(msgId)) continue;
-
-      if ((msg as { _getType?: () => string })._getType?.() === "ai") {
-        const aiMsg = msg as AIMessage & { tool_calls?: Array<{ name: string; args: Record<string, unknown> }> };
-        if (aiMsg.tool_calls && aiMsg.tool_calls.length > 0) {
-          stepCount++;
-          if (typeof aiMsg.content === "string" && aiMsg.content.trim()) {
-            yield { type: "thinking", content: `💭 思考 #${stepCount}: ${aiMsg.content}` };
-            reasoning.push(`思考: ${aiMsg.content}`);
-          }
-          for (const toolCall of aiMsg.tool_calls) {
-            const displayName = toolNameMap[toolCall.name] || toolCall.name;
-            yield { type: "thinking", content: `🔧 决策: 调用 ${displayName}` };
-            yield {
-              type: "tool_call",
-              content: `正在调用 ${displayName}...\n参数: ${JSON.stringify(toolCall.args, null, 2)}`,
-              toolName: toolCall.name,
-            };
-            reasoning.push(`调用工具: ${displayName}(${JSON.stringify(toolCall.args)})`);
-          }
-          processedMessageIds.add(msgId);
-        } else if (typeof aiMsg.content === "string" && aiMsg.content) {
-          finalReply = aiMsg.content;
-          yield { type: "text", content: aiMsg.content };
-          processedMessageIds.add(msgId);
-        }
-      }
-
-      if ((msg as { _getType?: () => string })._getType?.() === "tool") {
-        const toolMsgId = (msg as unknown as { id?: string }).id || `tool-${newMessages.indexOf(msg)}`;
-        if (processedMessageIds.has(toolMsgId)) continue;
-        const toolName = (msg as unknown as { name: string }).name;
-        const toolContent =
-          typeof (msg as { content: unknown }).content === "string"
-            ? (msg as { content: string }).content
-            : JSON.stringify((msg as { content: unknown }).content);
-
-        toolCalls.push({
-          toolName,
-          input: {},
-          output: toolContent,
-          duration: 0,
-          success: true,
-        });
-
-        yield {
-          type: "thinking",
-          content: `📥 观察: ${toolNameMap[toolName] || toolName} 返回结果`,
-        };
-        yield { type: "tool_result", content: toolContent, toolName };
-        reasoning.push(`${toolNameMap[toolName] || toolName} 返回结果`);
-        processedMessageIds.add(toolMsgId);
+    const update = chunk as Record<string, unknown>;
+    if (update.classifyIntent != null) {
+      const u = update.classifyIntent as { intentMatch?: { intent: { name: string } } | null };
+      intentMatch = u.intentMatch ?? null;
+      if (intentMatch) {
+        yield { type: "thinking", content: `🔍 识别到意图：${intentMatch.intent.name}` };
+        reasoning.push(`识别到意图：${intentMatch.intent.name}`);
       }
     }
+    if (update.runIntentChain != null) {
+      const u = update.runIntentChain as { toolResults?: typeof toolResults };
+      toolResults = u.toolResults ?? [];
+      for (const tr of toolResults) {
+        const displayName = toolNameMap[tr.tool] || tr.tool;
+        yield { type: "thinking", content: `🔧 决策: 调用 ${displayName}` };
+        yield {
+          type: "tool_call",
+          content: `正在调用 ${displayName}...\n参数: ${JSON.stringify(tr.input, null, 2)}`,
+          toolName: tr.tool,
+        };
+        reasoning.push(`调用工具: ${displayName}`);
+        yield { type: "thinking", content: `📥 观察: ${displayName} 返回结果` };
+        yield { type: "tool_result", content: tr.result, toolName: tr.tool };
+        reasoning.push(`${displayName} 返回结果`);
+      }
+    }
+    if (update.summarizeIntent != null) {
+      const u = update.summarizeIntent as { finalReply?: string };
+      finalReply = u.finalReply ?? "";
+      yield { type: "text", content: finalReply };
+    }
   }
+
+  // 无意图命中：在 agent 层流式跑 ReAct，按步产出 thinking / tool_call / tool_result / text
+  if (!intentMatch && finalReply === "") {
+    const reactAgent = getReactAgent();
+    const reactStream = await reactAgent.stream({ messages }, { streamMode: "updates" });
+    const reactToolCalls: ToolCallResult[] = [];
+    for await (const chunk of reactStream) {
+      const update = chunk as Record<string, { messages?: BaseMessage[] }>;
+      if (update.agent?.messages?.length) {
+        for (const m of update.agent.messages) {
+          const type = (m as { _getType?: () => string })._getType?.();
+          if (type !== "ai") continue;
+          const ai = m as { tool_calls?: Array<{ name?: string; args?: unknown; id?: string }>; content?: string };
+          if (ai.tool_calls?.length) {
+            for (const tc of ai.tool_calls) {
+              const name = tc.name ?? "";
+              const displayName = toolNameMap[name] || name;
+              yield { type: "thinking", content: `🔧 决策: 调用 ${displayName}` };
+              yield {
+                type: "tool_call",
+                content: `正在调用 ${displayName}...\n参数: ${JSON.stringify(tc.args ?? {}, null, 2)}`,
+                toolName: name,
+              };
+              reasoning.push(`调用工具: ${displayName}`);
+              reactToolCalls.push({ toolName: name, input: (tc.args as Record<string, unknown>) ?? {}, output: "", duration: 0, success: true });
+            }
+          }
+          if (typeof ai.content === "string" && ai.content.trim()) {
+            finalReply = ai.content;
+            yield { type: "text", content: ai.content };
+          }
+        }
+      }
+      if (update.tools?.messages?.length) {
+        for (const m of update.tools.messages) {
+          const type = (m as { _getType?: () => string })._getType?.();
+          if (type !== "tool") continue;
+          const tm = m as { name?: string; content?: string };
+          const name = tm.name ?? "";
+          const displayName = toolNameMap[name] || name;
+          yield { type: "thinking", content: `📥 观察: ${displayName} 返回结果` };
+          yield { type: "tool_result", content: typeof tm.content === "string" ? tm.content : JSON.stringify(tm.content ?? ""), toolName: name };
+          reasoning.push(`${displayName} 返回结果`);
+          for (let i = reactToolCalls.length - 1; i >= 0; i--) {
+            if (reactToolCalls[i].toolName === name) {
+              reactToolCalls[i].output = typeof tm.content === "string" ? tm.content : JSON.stringify(tm.content ?? "");
+              break;
+            }
+          }
+        }
+      }
+    }
+    toolResults = reactToolCalls.map((t) => ({
+      tool: t.toolName,
+      input: t.input,
+      result: typeof t.output === "string" ? t.output : JSON.stringify(t.output ?? ""),
+    }));
+  }
+
+  const toolCalls: ToolCallResult[] = toolResults.map((tr) => ({
+    toolName: tr.tool,
+    input: tr.input,
+    output: tr.result,
+    duration: 0,
+    success: true,
+  }));
 
   const aiMessage: ChatMessage = {
     id: generateId(),

@@ -6,9 +6,9 @@
   "type": "module",
   "main": "dist/server.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp src/intents/intents.json dist/intents/",
     "start": "node dist/server.js",
-    "dev": "tsc && node dist/server.js"
+    "dev": "tsc && cp src/intents/intents.json dist/intents/ && node dist/server.js"
   },
   "dependencies": {
     "@langchain/core": "^1.1.15",
