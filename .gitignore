@@ -57,3 +57,6 @@ coverage/
 # Misc
 *.local
 Thumbs.db
+
+# LangGraph API
+.langgraph_api

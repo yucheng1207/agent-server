@@ -38,6 +38,9 @@ export function createIntentGraph() {
   return graph.compile();
 }
 
+/** 编译后的图，供 LangGraph Studio / langgraph dev 加载 */
+export const graph = createIntentGraph();
+
 export type { GraphState, NodeConfig };
 export { initialGraphState, GraphStateAnnotation } from "./state.js";
 export { classifyIntentNode, runIntentChainNode, summarizeIntentNode, noIntentNode } from "./nodes.js";

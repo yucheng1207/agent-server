@@ -1,0 +1,7 @@
+{
+  "node_version": "20",
+  "graphs": {
+    "agent": "./dist/graph/index.js:graph"
+  },
+  "env": ".env.local"
+}

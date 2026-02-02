@@ -8,7 +8,8 @@
   "scripts": {
     "build": "tsc && cp src/intents/intents.json dist/intents/",
     "start": "node dist/server.js",
-    "dev": "tsc && cp src/intents/intents.json dist/intents/ && node dist/server.js"
+    "dev": "tsc && cp src/intents/intents.json dist/intents/ && node dist/server.js",
+    "studio": "npm run build && npx @langchain/langgraph-cli dev"
   },
   "dependencies": {
     "@langchain/core": "^1.1.15",
@@ -20,6 +21,7 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
+    "@langchain/langgraph-cli": "^1.1.11",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "typescript": "^5.0.0"
