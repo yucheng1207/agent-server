@@ -49,9 +49,22 @@ export interface InterfaceLogQueryResult {
   queryType: string;
   totalLogs: number;
   results: Array<{ query: string; appId: number; message?: string; command?: string; success: boolean; logCount: number; logs: InterfaceLogInfo[]; error?: string }>;
-  /** 与 agent-demo 一致：顶层汇总的提取数据，如 payToken 列表 */
+  /** 与 agent-demo 一致：顶层汇总的提取数据，如 payToken 列表；routing 时包含 paymentMethodsByPayToken（按 payToken 汇总的支付方式，来自 paymentListSearch） */
   extractedData?: Record<string, unknown>;
   error?: string;
+}
+
+/** 单条支付方式：name 名称，selected 是否默认选中，isHide 是否默认折叠 */
+export interface PaymentWayItem {
+  name: string;
+  selected?: boolean;
+  isHide?: boolean;
+}
+
+/** 单个 payToken 下发的支付方式：自有 displayPayways + 三方 thirdPartyDisplayInfoList */
+export interface PaymentMethodsForPayToken {
+  ownPayways: PaymentWayItem[];
+  thirdParty: PaymentWayItem[];
 }
 
 function delay(ms: number): Promise<void> {
@@ -71,6 +84,55 @@ function extractPayToken(log: BatLogEntry): string | null {
   } catch {
     return null;
   }
+}
+
+function toPaymentWayItem(item: Record<string, unknown>): PaymentWayItem {
+  return {
+    name: String(item.name ?? ""),
+    selected: item.selected === true,
+    isHide: item.isHide === true,
+  };
+}
+
+/** 从 paymentListSearch 单条日志的 rawMessage 中提取 payToken 及下发的支付方式 */
+function extractPaymentMethodsFromPaymentListSearchLog(rawMessage: Record<string, unknown> | undefined): { payToken: string; ownPayways: PaymentWayItem[]; thirdParty: PaymentWayItem[] } | null {
+  if (!rawMessage) return null;
+  try {
+    const req = rawMessage.request as Record<string, unknown> | undefined;
+    const payToken = typeof req?.payToken === "string" ? req.payToken : "";
+    if (!payToken) return null;
+    const res = rawMessage.response as Record<string, unknown> | undefined;
+    const displayInfo = res?.displayInfo as Record<string, unknown> | undefined;
+    const ownPayDisplayInfo = displayInfo?.ownPayDisplayInfo as Record<string, unknown> | undefined;
+    const displayPayways = Array.isArray(ownPayDisplayInfo?.displayPayways) ? ownPayDisplayInfo.displayPayways as Record<string, unknown>[] : [];
+    const thirdPartyDisplayInfoList = Array.isArray(displayInfo?.thirdPartyDisplayInfoList) ? displayInfo.thirdPartyDisplayInfoList as Record<string, unknown>[] : [];
+    return {
+      payToken,
+      ownPayways: displayPayways.map(toPaymentWayItem),
+      thirdParty: thirdPartyDisplayInfoList.map(toPaymentWayItem),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** 从 routing 结果中按 payToken 汇总 paymentListSearch 下发的支付方式 */
+function aggregatePaymentMethodsByPayToken(results: InterfaceLogQueryResult["results"]): Record<string, PaymentMethodsForPayToken> {
+  const byPayToken: Record<string, PaymentMethodsForPayToken> = {};
+  for (const r of results) {
+    if (r.command !== "paymentListSearch" || !r.logs) continue;
+    for (const log of r.logs) {
+      const raw = log.rawMessage as Record<string, unknown> | undefined;
+      const extracted = extractPaymentMethodsFromPaymentListSearchLog(raw);
+      if (extracted) {
+        byPayToken[extracted.payToken] = {
+          ownPayways: extracted.ownPayways,
+          thirdParty: extracted.thirdParty,
+        };
+      }
+    }
+  }
+  return byPayToken;
 }
 
 function extractLogInfo(log: BatLogEntry, extractors?: Record<string, (l: BatLogEntry) => unknown>): InterfaceLogInfo {
@@ -209,6 +271,12 @@ export async function queryInterfaceLogs(
   for (const [key, values] of Object.entries(extractedDataAgg)) {
     extractedDataTop[key] = [...new Set(values)];
   }
+  if (queryType === "routing") {
+    const paymentMethodsByPayToken = aggregatePaymentMethodsByPayToken(results);
+    if (Object.keys(paymentMethodsByPayToken).length > 0) {
+      extractedDataTop.paymentMethodsByPayToken = paymentMethodsByPayToken;
+    }
+  }
   return {
     success: allLogs.length > 0,
     queryType,
@@ -240,7 +308,7 @@ export const interfaceLogQueryTool = tool(
   {
     name: "interface_log_query",
     description:
-      "通用接口日志查询。创单(creation)用订单号、路由(routing)用 PageTraceId。查支付提交(payment)时必须先调用 payment_trace 获取时间与 payToken，再用 payToken 作为 tagValue、时间范围作为 fromDate/toDate 调用本工具，禁止未先调 payment_trace 就查 payment。",
+      "通用接口日志查询。创单(creation)用订单号、路由(routing)用 PageTraceId。回答「订单下发了哪些支付方式」「收银台有哪些支付方式」时必须用 queryType=routing、tagValue=pageTraceId 调用本工具，返回的 extractedData.paymentMethodsByPayToken 即下发的支付方式列表（来自 33482 paymentListSearch）；禁止仅用 payment_trace 回答。查支付提交(payment)时必须先调用 payment_trace 获取 payToken 再查。",
     schema: z.object({
       queryType: z.string().describe("查询类型：creation、routing、payment 或 custom"),
       tagValue: z.string().describe("标签值：创单用订单号(outTradeNo)；路由用 PageTraceId(paytraceid)可逗号分隔；支付用 PayToken(tradeNo)"),
