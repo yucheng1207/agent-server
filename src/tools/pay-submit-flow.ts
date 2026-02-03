@@ -30,10 +30,11 @@ const PAY_SUBMIT_END_CODE: Record<string, string> = {
   "24": "订单已支付成功,请勿重复支付!",
   "25": "银行卡余额不足",
   "26": "好友已支付",
-  "31": "优惠不可用（不满足当前优惠）",
+  "31": "优惠不可用（卡不满足当前优惠）",
   "32": "优惠不可用（达到优惠次数上限）",
   "33": "优惠不可用（活动结束）",
   "34": "优惠不可用（超出库存）",
+  "35": "优惠不可用（有可用活动）",
   "36": "需要补充银行卡信息",
   "37": "短信失败",
   "38": "短信失败",
@@ -81,7 +82,7 @@ const PAY_SUBMIT_END_CODE: Record<string, string> = {
   "84": "高风控，可以申诉",
   "85": "一键绑卡金额超限",
   "86": "拿去花支付失败",
-  "87": "优惠不可用（不能抵扣保险）",
+  "87": "优惠不可用（保险）",
   "88": "需要更换通道（3ds）",
   "89": "提交失败（展示后付操作按钮）",
   "90": "固定RC（启用extendErrorCode）",
@@ -127,27 +128,50 @@ const BAT_NODE_KEYWORDS = [
 /** 不生成 BAT 的节点 */
 const NO_BAT_KEYWORDS = ["通知交易", "通知BU", "最终支付结果通知"];
 
+/** queryTraceNodeInfo 返回的 infoList 单项 */
+interface InfoListItem {
+  key: string;
+  value: string | number | null;
+}
+
+/** queryTraceNodeInfo 返回的 displayInfos 单项（与接口一致） */
 interface DisplayInfo {
-  date?: number;
-  appId?: string | number;
-  catMessageId?: string;
   name?: string;
-  chainName?: string;
-  desc?: string;
-  title?: string;
-  code?: string | number;
-  riskLevel?: string | number;
-  [key: string]: unknown;
+  status?: number | null;
+  infoList?: InfoListItem[];
+  date?: string;
+  type?: string;
+  subType?: string | null;
+  extend?: unknown;
+  during?: number;
+  appId?: string | number | null;
+  catMessageId?: string | null;
 }
 
 interface TraceDataItem {
+  payToken?: string;
+  paymentTraceId?: string;
+  date?: string;
   displayInfos?: DisplayInfo[];
-  [key: string]: unknown;
 }
 
 function nodeLabel(info: DisplayInfo): string {
-  const s = [info.name, info.chainName, info.desc, info.title].filter(Boolean).join(" ");
-  return s || "未知节点";
+  return info?.name?.trim() || "未知节点";
+}
+
+/** 从 infoList 构建 key -> value 表，仅保留 value 非 null 且非空且非字符串 "null" 的项 */
+function getInfoMap(info: DisplayInfo): Record<string, string | number> {
+  const map: Record<string, string | number> = {};
+  const list = info?.infoList;
+  if (!Array.isArray(list)) return map;
+  for (const item of list) {
+    if (item == null || !item.key) continue;
+    const v = item.value;
+    if (v == null) continue;
+    if (typeof v === "string" && (v.trim() === "" || v === "null")) continue;
+    map[item.key] = v;
+  }
+  return map;
 }
 
 function shouldGenBat(label: string): boolean {
@@ -156,27 +180,82 @@ function shouldGenBat(label: string): boolean {
   return BAT_NODE_KEYWORDS.some((k) => lower.includes(k));
 }
 
+/** 将 date 转为毫秒时间戳（支持 number 或 "2026-02-01 16:06:55.397" 格式） */
+function parseDateToMs(value: unknown): number {
+  if (value == null) return NaN;
+  if (typeof value === "number" && !Number.isNaN(value)) return value;
+  const s = String(value).trim();
+  if (!s) return NaN;
+  const t = new Date(s.replace(/\s+/, "T") + (s.match(/\d{4}-\d{2}-\d{2}$/) ? "Z" : ""));
+  return Number.isNaN(t.getTime()) ? NaN : t.getTime();
+}
+
 function buildBatLink(info: DisplayInfo): string | null {
-  const date = info.date;
-  const appId = info.appId != null ? String(info.appId) : "";
-  const catMessageId = info.catMessageId;
-  if (date == null || !appId || !catMessageId) return null;
-  const fromTime = date - 5 * 60 * 1000;
-  const toTime = date + 5 * 60 * 1000;
+  const dateMs = parseDateToMs(info.date);
+  const appId = info.appId != null && String(info.appId) !== "null" ? String(info.appId) : "";
+  const catMessageId = info.catMessageId != null && String(info.catMessageId) !== "null" ? String(info.catMessageId) : "";
+  if (Number.isNaN(dateMs) || dateMs <= 0 || !appId || !catMessageId) return null;
+  const fromTime = dateMs - 5 * 60 * 1000;
+  const toTime = dateMs + 5 * 60 * 1000;
   return `https://bat.fx.ctripcorp.com/trace/${catMessageId}?${appId}&identifier=clog&from=${fromTime}&to=${toTime}`;
 }
 
+/** 从「获取基础数据」节点取支付方式、优惠（infoList 的 key-value） */
 function extractPayMethodAndDiscount(displayInfos: DisplayInfo[]): { payMethod?: string; discount?: string } {
   for (const info of displayInfos) {
-    const label = nodeLabel(info);
-    if (!label.includes("支付提交开始")) continue;
-    const raw = (info as Record<string, unknown>).rawMessage ?? info.message ?? info.content ?? "";
-    const str = typeof raw === "string" ? raw : JSON.stringify(raw);
-    const payMethod = str.match(/支付方式[：:]\s*([^\s,}\]]+)/)?.[1] ?? str.match(/payMethod[":\s]+([^",}\s]+)/)?.[1];
-    const discount = str.match(/优惠[：:]\s*([^\s,}\]]+)/)?.[1];
-    if (payMethod || discount) return { payMethod: payMethod?.trim(), discount: discount?.trim() };
+    if (info == null) continue;
+    if (!nodeLabel(info).includes("获取基础数据")) continue;
+    const map = getInfoMap(info);
+    const pay1 = map["支付方式1"];
+    const pay2 = map["支付方式2"];
+    const discount = map["优惠"];
+    const payMethod = pay1 || pay2 ? [pay1, pay2].filter(Boolean).map(String).join("；") : undefined;
+    return { payMethod, discount: discount != null ? String(discount) : undefined };
   }
   return {};
+}
+
+/** 状态码 → 文案（0=成功 1=失败 2=转异步） */
+const STATUS_TEXT: Record<string, string> = {
+  "0": "成功",
+  "1": "失败",
+  "2": "转异步",
+};
+
+/** 状态 0/1/2 转为中文展示 */
+function formatStatus(status: number | null | undefined): string | undefined {
+  if (status === undefined || status === null) return undefined;
+  const s = String(status).trim();
+  if (s === "") return undefined;
+  return STATUS_TEXT[s] ?? s;
+}
+
+/** 仅当值存在且非 "null" 字符串时输出一行 */
+function pushLine(lines: string[], key: string, val: string | number | null | undefined): void {
+  if (val == null) return;
+  const s = String(val).trim();
+  if (s === "" || s === "null") return;
+  lines.push(`- **${key}**：${val}`);
+}
+
+/** 按 queryTraceNodeInfo 实际结构：顶层 date/during/status/type/subType/appId + infoList 的 key-value */
+function formatNodeDetail(info: DisplayInfo): string[] {
+  if (info == null || typeof info !== "object") return [];
+  const label = nodeLabel(info);
+  const lines: string[] = [];
+  lines.push(`### ${label}`);
+  pushLine(lines, "date", info.date);
+  pushLine(lines, "耗时", info.during != null ? `${info.during}ms` : undefined);
+  pushLine(lines, "状态", formatStatus(info.status));
+  pushLine(lines, "type", info.type);
+  pushLine(lines, "subType", info.subType != null ? String(info.subType) : undefined);
+  pushLine(lines, "appId", info.appId != null && String(info.appId) !== "null" ? String(info.appId) : undefined);
+  const infoMap = getInfoMap(info);
+  for (const [key, value] of Object.entries(infoMap)) {
+    if (key === "返回debugMessage" && (value === "" || value === "null")) continue;
+    pushLine(lines, key, value);
+  }
+  return lines;
 }
 
 async function queryTraceNodeInfo(pageTraceId: string, cid: string): Promise<{ data?: TraceDataItem[]; [key: string]: unknown }> {
@@ -238,22 +317,36 @@ function formatReport(pageTraceId: string, dataItems: TraceDataItem[]): string {
     if (payMethod) sections.push(`**支付方式**：${payMethod}`);
     if (discount) sections.push(`**优惠信息**：${discount}`);
 
+    for (const info of displayInfos) {
+      if (info == null) continue;
+      sections.push(...formatNodeDetail(info));
+      sections.push("");
+    }
+
     const riskLevels: string[] = [];
-    let submitEndCode: string | number | undefined;
+    let submitEndCode: string | undefined;
     let submitEndCodeText = "";
     let extendErrorCode: string | undefined;
+    let submitEndReturnMessage = "";
     const flowSteps: string[] = [];
     const batLinks: string[] = [];
 
     for (const info of displayInfos) {
+      if (info == null) continue;
       const label = nodeLabel(info);
-      if (label.includes("风控1002") && (info.riskLevel != null || info.riskLevel !== undefined)) {
-        riskLevels.push(`风控1002 等级: ${info.riskLevel}（200 以内正常，>200 为高风控）`);
+      const map = getInfoMap(info);
+      if (label.includes("风控1002")) {
+        const level = map["riskLevel"];
+        if (level != null) riskLevels.push(`风控1002 等级: ${level}（200 以内正常，>200 为高风控）`);
       }
       if (label.includes("支付提交结束")) {
-        submitEndCode = info.code != null ? String(info.code) : undefined;
+        const codeVal = map["返回code"];
+        submitEndCode = codeVal != null ? String(codeVal) : undefined;
         submitEndCodeText = submitEndCode ? PAY_SUBMIT_END_CODE[submitEndCode] ?? `code=${submitEndCode}` : "";
-        extendErrorCode = info.extendErrorCode != null ? String(info.extendErrorCode) : undefined;
+        const extCode = map["extendErrorCode"];
+        extendErrorCode = extCode != null ? String(extCode) : undefined;
+        const msgVal = map["返回message"];
+        if (msgVal != null && String(msgVal).trim() !== "" && String(msgVal) !== "null") submitEndReturnMessage = String(msgVal);
       }
 
       const batUrl = shouldGenBat(label) ? buildBatLink(info) : null;
@@ -280,13 +373,18 @@ function formatReport(pageTraceId: string, dataItems: TraceDataItem[]): string {
       }
       sections.push(resultLine);
     }
+    sections.push(
+      submitEndReturnMessage
+        ? `**给用户的提示（返回message）**：${submitEndReturnMessage}`
+        : "**给用户的提示（返回message）**：无。若本单为失败场景但此处无值，前端不会弹框，属服务问题需开发排查。"
+    );
     if (batLinks.length) sections.push(`后端日志：${batLinks.join(" ")}`);
 
     sections.push("");
   }
 
   sections.push(
-    "**说明**：4、8、12 表示成功；100000 一般为三方支付，是否成功需看后续三方结果。若无法从后端日志分析失败原因，可查前端埋点 chainName=receive303 的 debugMessage。"
+    "**说明**：支付提交结束表示 303 返回。code 4、8、12 表示成功；31=卡不满足当前优惠、32=达到优惠次数上限、33=活动结束、34=超出库存、35=有可用活动、87=保险优惠不可用处理；100000 一般为三方支付。**具体给用户的提示以该 code 返回的 message 为准**。若无法从后端日志分析失败原因，可查前端埋点 chainName=receive303 的 debugMessage。"
   );
   return sections.join("\n");
 }

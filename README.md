@@ -1,5 +1,7 @@
 # 排障 Agent 服务端
 
+**技术分享与实现细节**：见根目录 [TECH_SHARE.md](./TECH_SHARE.md)。架构或核心逻辑变更时请同步更新该文档。
+
 redsea 的 AI 聊天页（`redsea/src/pages/aiChat.tsx`）与 agent-demo **功能一致**：仅调用本 agent-server 的流式接口，展示思考过程、工具调用与结论。前端逻辑维护在 `redsea/src/ai`，通过 `callAgentStream` 请求本服务。
 
 本目录位于 `ai-project/agent-server`，基于 LangChain/LangGraph + MCP，与 agent-demo 逻辑对齐；默认地址 `http://localhost:3002/api/chat`，可由 redsea 的 `REACT_APP_AGENT_STREAM_URL` 或 URL 参数 `agentStreamUrl` 覆盖。

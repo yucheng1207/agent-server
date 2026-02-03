@@ -61,5 +61,43 @@
       "payment_trace": "payment_trace_summary"
     },
     "answerInstruction": "根据 interface_log_query 返回的创单相关日志（兼容层创单 createPayOrder、中台创单 createTradeOrder），总结该订单的创单记录、接口调用情况与结果；若无日志则说明可能时间窗口外或需进一步排查。"
+  },
+  {
+    "id": "query_payment_submit_discount_result",
+    "name": "查询订单支付提交详情（支付方式、验证项、优惠与结果）",
+    "keywords": [
+      "支付提交详情",
+      "支付提交了哪些优惠",
+      "支付提交优惠",
+      "优惠使用",
+      "优惠成功",
+      "优惠失败",
+      "优惠失败原因",
+      "优惠用了没",
+      "优惠使用成功",
+      "用户是否支付提交过",
+      "是否支付提交",
+      "用户否认自己支付",
+      "支付点击动作",
+      "验证项",
+      "支付方式 验证",
+      "用了哪些支付方式",
+      "支付提交 支付方式"
+    ],
+    "toolSequence": [
+      {
+        "tool": "payment_trace",
+        "params": { "orderId": "{{orderId}}" }
+      },
+      {
+        "tool": "pay_submit_flow",
+        "params": { "pageTraceId": "{{pageTraceId}}" }
+      }
+    ],
+    "paramFromContext": ["orderId"],
+    "stepResultParsers": {
+      "payment_trace": "payment_trace_summary"
+    },
+    "answerInstruction": "根据 pay_submit_flow 返回的支付提交流程，按以下结构组织回答，无需用户逐条问：(1) 用户是否提交过支付、支付提交流程概要；(2) 使用了哪些支付方式、优惠信息；(3) 涉及的验证项（如返回验证链/返回验证项、密码组件验证、风控校验等）；(4) 优惠是否使用成功；(5) 若不成功，失败原因（支付提交结果 code 含义：31=卡不满足当前优惠、32=达到优惠次数上限、33=活动结束、34=超出库存、87=保险优惠不可用等）及当时给用户的提示（以工具中「给用户的提示（返回message）」为准）；(6) 最终支付结果。信息均来自工具返回，不要编造；若某条无数据则说明「未在流程中体现」。适用于用户询问支付提交详情或用户否认自己支付需核实点击动作、验证项等场景。"
   }
 ]
