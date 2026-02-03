@@ -1,15 +1,27 @@
 {
   "name": "redsea-agent-server",
   "version": "0.1.0",
-  "private": true,
-  "description": "排障 Agent 服务端，基于 LangChain/LangGraph + MCP，可部署到 BFF 或独立 Node 运行",
+  "description": "排障 Agent 服务端，基于 LangChain/LangGraph + MCP，可部署到 BFF 或独立 Node 运行；支持作为 npm 包供外部调用 agent",
   "type": "module",
-  "main": "dist/server.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc && cp src/intents/intents.json dist/intents/",
     "start": "node dist/server.js",
     "dev": "tsc && cp src/intents/intents.json dist/intents/ && node dist/server.js",
-    "studio": "npm run build && npx @langchain/langgraph-cli dev"
+    "studio": "npm run build && npx @langchain/langgraph-cli dev",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@langchain/core": "^1.1.15",

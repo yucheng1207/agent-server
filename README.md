@@ -41,6 +41,55 @@ redsea 的 AI 聊天页（`redsea/src/pages/aiChat.tsx`）与 agent-demo **功�
 
 根目录下可放置 `.env` 或 `.env.local`（后者优先），参考 `.env.example`。
 
+## 作为 npm 包使用
+
+本包可安装为依赖，在自有服务中直接调用 Agent 流式接口，无需起 HTTP 服务。
+
+### 安装
+
+```bash
+npm install redsea-agent-server
+```
+
+### 使用方式
+
+```ts
+import { streamAgent, type AgentStreamChunk, type SessionContext } from "redsea-agent-server";
+
+// 流式调用：传入用户输入、可选 sessionId、可选 context（如 orderId）
+for await (const chunk of streamAgent("订单 123 的支付提交详情", undefined, { orderId: "123" })) {
+  switch (chunk.type) {
+    case "thinking":
+      console.log("思考:", chunk.content);
+      break;
+    case "tool_call":
+      console.log("调用工具:", chunk.toolName, chunk.content);
+      break;
+    case "tool_result":
+      console.log("工具结果:", chunk.toolName, chunk.content);
+      break;
+    case "text":
+      console.log("回复:", chunk.content);
+      break;
+    case "done":
+      break;
+  }
+}
+```
+
+- **streamAgent(input, sessionId?, context?)**：返回 `AsyncGenerator<AgentStreamChunk>`，chunk 类型为 `thinking` | `tool_call` | `tool_result` | `text` | `done`。
+- **SessionContext**：可选，如 `{ orderId: "123" }`，便于意图匹配时解析订单号；多轮对话建议传固定 `sessionId` 以复用历史。
+
+### 环境变量
+
+作为库使用时，LLM、MCP、BAT 等仍通过环境变量配置（与「本地运行」一节一致）。在宿主项目根目录配置 `.env` / `.env.local`，或在进程启动前设置 `process.env.LLM_API_KEY` 等。
+
+### 发布前
+
+如需发布到 npm：先执行 `npm run build` 再 `npm publish`（仅 `dist` 与 `README.md` 会打入包内）。若仅内网使用，可用 `npm pack` 得到 tgz 后 `npm install ./redsea-agent-server-0.1.0.tgz` 安装。
+
+---
+
 ## 本地运行
 
 ```bash
